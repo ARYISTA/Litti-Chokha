@@ -16,16 +16,16 @@ jobs:
       - name: Checkout Repository
         uses: actions/checkout@v4
 
-    
       - name: Sync Solutions
         uses: joshcai/leetcode-sync@v1.5
+        env:
+          
+          GIT_AUTHOR_NAME: "ARYISTA"
+          GIT_AUTHOR_EMAIL: "202307020014@karnavatiuniversity.edu.in"
+          GIT_COMMITTER_NAME: "ARYISTA"
+          GIT_COMMITTER_EMAIL: "202307020014@karnavatiuniversity.edu.in"
         with:
           github-token: ${{ github.token }}
           leetcode-csrf-token: ${{ secrets.LEETCODE_CSRF_TOKEN }}
           leetcode-session: ${{ secrets.LEETCODE_SESSION }}
           destination-folder: leetcode-problems
-          verbose: true
-          commit-header: '[LeetCode Sync]'
-          commit-author-name: "ARYISTA"
-          commit-author-email: "202307020014@karnavatiuniversity.edu.in"
-
