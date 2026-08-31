@@ -9,6 +9,10 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
+      - name: Configure Git Author
+        run: |
+          git config --global user.name "ARYISTA"
+          git config --global user.email "202307020014@karnavatiuniversity.edu.in"
       - name: Sync Solutions
         uses: joshcai/leetcode-sync@v1.5
         with:
