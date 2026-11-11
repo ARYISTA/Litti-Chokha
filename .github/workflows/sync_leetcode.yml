@@ -3,7 +3,7 @@ name: Sync Leetcode
 on:
   workflow_dispatch:
   schedule:
-    - cron: "0 8 * * 6"
+    - cron: "0 8 * * 6" # Every Saturday at 8:00 AM UTC
 
 permissions:
   contents: write
@@ -25,16 +25,18 @@ jobs:
       - name: Install Dependencies
         run: pip install requests
 
-      - name: Fetch Recent Submissions & Commit
+      - name: Fetch Submissions and Save Files
         env:
           LEETCODE_SESSION: ${{ secrets.LEETCODE_SESSION }}
           LEETCODE_CSRF_TOKEN: ${{ secrets.LEETCODE_CSRF_TOKEN }}
-          GIT_AUTHOR_NAME: "ARYISTA"
-          GIT_AUTHOR_EMAIL: "202307020014@karnavatiuniversity.edu.in"
         run: |
           python - << 'EOF'
-          import os, sys, requests, json
+          import os
+          import sys
+          import json
+          import time
           from pathlib import Path
+          import requests
 
           session = os.environ.get("LEETCODE_SESSION")
           csrf = os.environ.get("LEETCODE_CSRF_TOKEN")
@@ -47,34 +49,132 @@ jobs:
               "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
               "Referer": "https://leetcode.com",
               "Cookie": f"LEETCODE_SESSION={session}; csrftoken={csrf}",
-              "x-csrftoken": csrf
+              "x-csrftoken": csrf,
+              "Content-Type": "application/json"
           }
 
-          # Query LeetCode GraphQL
-          query = {
+          GRAPHQL_URL = "https://leetcode.com/graphql"
+
+          # Extension mapping for supported LeetCode languages
+          EXT_MAP = {
+              "python": "py",
+              "python3": "py",
+              "java": "java",
+              "cpp": "cpp",
+              "c": "c",
+              "csharp": "cs",
+              "javascript": "js",
+              "typescript": "ts",
+              "golang": "go",
+              "rust": "rs",
+              "kotlin": "kt",
+              "swift": "swift",
+              "sql": "sql"
+          }
+
+          dest_dir = Path("leetcode-problems")
+          dest_dir.mkdir(parents=True, exist_ok=True)
+
+          # Step 1: Fetch recent submissions list
+          list_query = {
               "query": """
-              query recentAcSubmissions($username: String!, $limit: Int!) {
-                  recentAcSubmissionList(username: $username, limit: $limit) {
-                      id
-                      title
-                      titleSlug
-                      timestamp
+              query getRecentSubmissions($limit: Int!) {
+                  submissionList(offset: 0, limit: $limit) {
+                      submissions {
+                          id
+                          statusDisplay
+                          lang
+                          title
+                          titleSlug
+                          timestamp
+                      }
                   }
               }
               """,
-              "variables": {"username": "ARYISTA", "limit": 20}
+              "variables": {"limit": 30}
           }
 
-          resp = requests.post("https://leetcode.com/graphql", json=query, headers=headers)
-          print(f"Status: {resp.status_code}")
+          resp = requests.post(GRAPHQL_URL, json=list_query, headers=headers)
           if resp.status_code != 200:
-              print(resp.text[:300])
+              print(f"Error fetching submissions list: {resp.status_code}")
+              sys.exit(1)
+
+          data = resp.json()
+          submissions = data.get("data", {}).get("submissionList", {}).get("submissions", [])
+          print(f"Retrieved {len(submissions)} recent submissions.")
+
+          # Step 2: Query code detail for Accepted submissions
+          detail_query = """
+          query submissionDetails($submissionId: Int!) {
+              submissionDetail(submissionId: $submissionId) {
+                  code
+                  timestamp
+                  lang {
+                      name
+                  }
+                  question {
+                      questionFrontendId
+                      title
+                      titleSlug
+                  }
+              }
+          }
+          """
+
+          saved_count = 0
+          seen_slugs = set()
+
+          for sub in submissions:
+              if sub.get("statusDisplay") != "Accepted":
+                  continue
+
+              slug = sub.get("titleSlug")
+              if slug in seen_slugs:
+                  continue
+              seen_slugs.add(slug)
+
+              sub_id = int(sub["id"])
+              detail_resp = requests.post(
+                  GRAPHQL_URL,
+                  json={"query": detail_query, "variables": {"submissionId": sub_id}},
+                  headers=headers
+              )
+
+              if detail_resp.status_code != 200:
+                  print(f"Failed to fetch details for {slug} (ID: {sub_id})")
+                  continue
+
+              detail_data = detail_resp.json().get("data", {}).get("submissionDetail")
+              if not detail_data or not detail_data.get("code"):
+                  continue
+
+              q_id = detail_data.get("question", {}).get("questionFrontendId", "0000")
+              lang_name = detail_data.get("lang", {}).get("name", "txt").lower()
+              ext = EXT_MAP.get(lang_name, "txt")
+              code = detail_data["code"]
+
+              # Folder naming: leetcode-problems/0001-two-sum/two-sum.py
+              folder_name = f"{int(q_id):04d}-{slug}"
+              prob_folder = dest_dir / folder_name
+              prob_folder.mkdir(parents=True, exist_ok=True)
+
+              file_path = prob_folder / f"{slug}.{ext}"
+              file_path.write_text(code, encoding="utf-8")
+              print(f"Saved: {file_path}")
+              saved_count += 1
+              time.sleep(0.5)  # Rate limiting safety
+
+          print(f"Successfully processed {saved_count} solutions.")
           EOF
 
-      - name: Commit and Push
+      - name: Commit and Push Solutions
         run: |
           git config user.name "ARYISTA"
           git config user.email "202307020014@karnavatiuniversity.edu.in"
-          git add leetcode-problems/ || true
-          git diff --staged --quiet || git commit -m "sync: leetcode solutions"
-          git push
+          git add leetcode-problems/
+          if git diff --staged --quiet; then
+            echo "No new solutions to commit."
+          else
+            git commit -m "sync: leetcode solutions [skip ci]"
+            git push origin HEAD
+          fi
