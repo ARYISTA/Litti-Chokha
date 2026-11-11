@@ -25,23 +25,28 @@ jobs:
       - name: Install Dependencies
         run: pip install requests
 
-      - name: Fetch and Write Submissions
+      - name: Fetch and Commit Each Submission Individually
         env:
           LEETCODE_SESSION: ${{ secrets.LEETCODE_SESSION }}
           LEETCODE_CSRF_TOKEN: ${{ secrets.LEETCODE_CSRF_TOKEN }}
           LEETCODE_USERNAME: "ARISTA2"
+          GIT_AUTHOR_NAME: "ARYISTA"
+          GIT_AUTHOR_EMAIL: "aryabist74@gmail.com"
         run: |
+          # Git author setup
+          git config user.name "$GIT_AUTHOR_NAME"
+          git config user.email "$GIT_AUTHOR_EMAIL"
+
           python - << 'EOF'
-          import os, sys, json, time, re, requests
+          import os, sys, json, time, re, subprocess, requests
+          from datetime import datetime
           from pathlib import Path
 
           session = os.environ.get("LEETCODE_SESSION")
           csrf = os.environ.get("LEETCODE_CSRF_TOKEN")
           username = os.environ.get("LEETCODE_USERNAME")
-
-          if not session or not csrf or not username:
-              print(" Missing credentials or username.")
-              sys.exit(1)
+          author_email = os.environ.get("GIT_AUTHOR_EMAIL")
+          author_name = os.environ.get("GIT_AUTHOR_NAME")
 
           headers = {
               "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
@@ -71,7 +76,7 @@ jobs:
               sys.exit(1)
 
           submissions = resp.json().get("data", {}).get("recentAcSubmissionList", [])
-          print(f"🔍 Found {len(submissions)} accepted submissions for '{username}'.")
+          print(f"🔍 Found {len(submissions)} accepted submissions.")
 
           dest_dir = Path("leetcode-problems")
           dest_dir.mkdir(parents=True, exist_ok=True)
@@ -97,24 +102,21 @@ jobs:
           }
           """
 
-          saved_count = 0
-          seen_slugs = set()
+          # Reverse submissions so oldest commits happen first (maintaining true timeline)
+          submissions.reverse()
+          new_commits = 0
 
           for sub in submissions:
               sub_id = int(sub["id"])
               slug = sub["titleSlug"]
-
-              if slug in seen_slugs:
-                  continue
-              seen_slugs.add(slug)
-
-              print(f"⏳ Processing: {slug} (ID: {sub_id})...", end=" ")
+              sub_title = sub["title"]
+              sub_timestamp = int(sub["timestamp"])
+              commit_date = datetime.fromtimestamp(sub_timestamp).isoformat()
 
               code_text = None
               lang_ext = "py"
-              q_num = "0000"
 
-              # Try GraphQL submissionDetails
+              # Fetch code
               d_resp = requests.post(
                   GRAPHQL_URL, 
                   json={"query": detail_query, "variables": {"submissionId": sub_id}}, 
@@ -122,15 +124,13 @@ jobs:
               )
 
               if d_resp.status_code == 200:
-                  d_json = d_resp.json()
-                  d_data = d_json.get("data", {}).get("submissionDetails")
+                  d_data = d_resp.json().get("data", {}).get("submissionDetails")
                   if d_data and d_data.get("code"):
                       code_text = d_data["code"]
                       lang_name = d_data.get("lang", {}).get("name", "py").lower()
                       lang_ext = ext_map.get(lang_name, lang_name)
-                      q_num = d_data.get("question", {}).get("questionId", "0000")
 
-              # Fallback: Scrape from submission detail page directly
+              # Fallback scrape
               if not code_text:
                   page_resp = requests.get(f"https://leetcode.com/submissions/detail/{sub_id}/", headers=headers)
                   if page_resp.status_code == 200:
@@ -141,32 +141,41 @@ jobs:
                           except Exception:
                               code_text = match.group(1)
 
-              if code_text:
-                  folder_name = f"{slug}"
-                  prob_dir = dest_dir / folder_name
-                  prob_dir.mkdir(parents=True, exist_ok=True)
+              if not code_text:
+                  continue
 
-                  out_file = prob_dir / f"solution.{lang_ext}"
-                  out_file.write_text(code_text, encoding="utf-8")
-                  print(f" Saved ({out_file.name})")
-                  saved_count += 1
-              else:
-                  print("Code not found.")
+              prob_dir = dest_dir / slug
+              prob_dir.mkdir(parents=True, exist_ok=True)
+              out_file = prob_dir / f"solution.{lang_ext}"
+              out_file.write_text(code_text, encoding="utf-8")
+
+              # Stage only this file
+              subprocess.run(["git", "add", str(out_file)], check=True)
+
+              # Check if this file actually has changes
+              diff_check = subprocess.run(["git", "diff", "--staged", "--quiet"])
+              if diff_check.returncode != 0:
+                  # Environment variables for exact submission date
+                  env_vars = os.environ.copy()
+                  env_vars["GIT_AUTHOR_DATE"] = commit_date
+                  env_vars["GIT_COMMITTER_DATE"] = commit_date
+
+                  commit_msg = f"solve: {slug} - {sub_title} [LeetCode Submission #{sub_id}]"
+                  commit_res = subprocess.run(
+                      ["git", "commit", "-m", commit_msg],
+                      env=env_vars,
+                      capture_output=True,
+                      text=True
+                  )
+                  if commit_res.returncode == 0:
+                      print(f" Committed: {slug} (Dated: {commit_date})")
+                      new_commits += 1
 
               time.sleep(0.4)
 
-          print(f"\n Successfully saved {saved_count} solutions.")
+          print(f"\n Done! Created {new_commits} individual commits.")
           EOF
 
-      - name: Commit and Push Solutions
+      - name: Push All Individual Commits
         run: |
-          git config user.name "ARYISTA"
-          git config user.email "aryabist74@gmail.com"
-          git add leetcode-problems/
-          git status
-          if git diff --staged --quiet; then
-            echo "No changes detected to commit."
-          else
-            git commit -m "sync: leetcode accepted submissions [skip ci]"
-            git push origin HEAD
-          fi
+          git push origin HEAD
