@@ -29,18 +29,18 @@ jobs:
         env:
           LEETCODE_SESSION: ${{ secrets.LEETCODE_SESSION }}
           LEETCODE_CSRF_TOKEN: ${{ secrets.LEETCODE_CSRF_TOKEN }}
-          LEETCODE_USERNAME: "ARISTA2" # Aapka LeetCode username
+          LEETCODE_USERNAME: "ARISTA2"
         run: |
           python - << 'EOF'
-          import os, sys, json, time, requests
+          import os, sys, json, time, re, requests
           from pathlib import Path
 
           session = os.environ.get("LEETCODE_SESSION")
           csrf = os.environ.get("LEETCODE_CSRF_TOKEN")
           username = os.environ.get("LEETCODE_USERNAME")
 
-          if not session or not csrf:
-              print("Missing secrets.")
+          if not session or not csrf or not username:
+              print(" Missing credentials or username.")
               sys.exit(1)
 
           headers = {
@@ -54,7 +54,7 @@ jobs:
           GRAPHQL_URL = "https://leetcode.com/graphql"
 
           # 1. Fetch recent accepted submissions
-          query = """
+          list_query = """
           query recentAcSubmissions($username: String!, $limit: Int!) {
               recentAcSubmissionList(username: $username, limit: $limit) {
                   id
@@ -65,69 +65,108 @@ jobs:
           }
           """
 
-          resp = requests.post(GRAPHQL_URL, json={"query": query, "variables": {"username": username, "limit": 20}}, headers=headers)
+          resp = requests.post(GRAPHQL_URL, json={"query": list_query, "variables": {"username": username, "limit": 20}}, headers=headers)
           if resp.status_code != 200:
-              print(f"Failed to fetch list: {resp.status_code}")
+              print(f" Failed to fetch submission list: {resp.status_code}")
               sys.exit(1)
 
           submissions = resp.json().get("data", {}).get("recentAcSubmissionList", [])
-          print(f"Found {len(submissions)} accepted submissions.")
+          print(f"🔍 Found {len(submissions)} accepted submissions for '{username}'.")
 
           dest_dir = Path("leetcode-problems")
           dest_dir.mkdir(parents=True, exist_ok=True)
 
-          # 2. Fetch code for each submission
+          ext_map = {
+              "python3": "py", "python": "py", "java": "java", "cpp": "cpp", 
+              "c": "c", "javascript": "js", "typescript": "ts", "golang": "go",
+              "rust": "rs", "mysql": "sql", "mssql": "sql", "csharp": "cs"
+          }
+
           detail_query = """
           query submissionDetails($submissionId: Int!) {
-              submissionDetail(submissionId: $submissionId) {
+              submissionDetails(submissionId: $submissionId) {
                   code
                   lang {
                       name
                   }
                   question {
-                      questionFrontendId
+                      questionId
                       titleSlug
                   }
               }
           }
           """
 
-          ext_map = {"python3": "py", "python": "py", "java": "java", "cpp": "cpp", "c": "c", "javascript": "js", "typescript": "ts"}
-          saved = 0
+          saved_count = 0
+          seen_slugs = set()
 
-          for item in submissions:
-              sub_id = int(item["id"])
-              d_resp = requests.post(GRAPHQL_URL, json={"query": detail_query, "variables": {"submissionId": sub_id}}, headers=headers)
-              
+          for sub in submissions:
+              sub_id = int(sub["id"])
+              slug = sub["titleSlug"]
+
+              if slug in seen_slugs:
+                  continue
+              seen_slugs.add(slug)
+
+              print(f"⏳ Processing: {slug} (ID: {sub_id})...", end=" ")
+
+              code_text = None
+              lang_ext = "py"
+              q_num = "0000"
+
+              # Try GraphQL submissionDetails
+              d_resp = requests.post(
+                  GRAPHQL_URL, 
+                  json={"query": detail_query, "variables": {"submissionId": sub_id}}, 
+                  headers=headers
+              )
+
               if d_resp.status_code == 200:
-                  d_data = d_resp.json().get("data", {}).get("submissionDetail")
+                  d_json = d_resp.json()
+                  d_data = d_json.get("data", {}).get("submissionDetails")
                   if d_data and d_data.get("code"):
-                      q_num = d_data["question"]["questionFrontendId"]
-                      slug = d_data["question"]["titleSlug"]
-                      lang = d_data["lang"]["name"].lower()
-                      ext = ext_map.get(lang, "txt")
+                      code_text = d_data["code"]
+                      lang_name = d_data.get("lang", {}).get("name", "py").lower()
+                      lang_ext = ext_map.get(lang_name, lang_name)
+                      q_num = d_data.get("question", {}).get("questionId", "0000")
 
-                      folder = dest_dir / f"{q_num.zfill(4)}-{slug}"
-                      folder.mkdir(parents=True, exist_ok=True)
+              # Fallback: Scrape from submission detail page directly
+              if not code_text:
+                  page_resp = requests.get(f"https://leetcode.com/submissions/detail/{sub_id}/", headers=headers)
+                  if page_resp.status_code == 200:
+                      match = re.search(r"submissionCode\s*:\s*['\"](.*?)['\"],\s*\n", page_resp.text)
+                      if match:
+                          try:
+                              code_text = bytes(match.group(1), "utf-8").decode("unicode_escape")
+                          except Exception:
+                              code_text = match.group(1)
 
-                      file_path = folder / f"solution.{ext}"
-                      file_path.write_text(d_data["code"], encoding="utf-8")
-                      print(f"Saved: {file_path}")
-                      saved += 1
-                      time.sleep(0.3)
+              if code_text:
+                  folder_name = f"{slug}"
+                  prob_dir = dest_dir / folder_name
+                  prob_dir.mkdir(parents=True, exist_ok=True)
 
-          print(f"Completed! Total saved: {saved}")
+                  out_file = prob_dir / f"solution.{lang_ext}"
+                  out_file.write_text(code_text, encoding="utf-8")
+                  print(f" Saved ({out_file.name})")
+                  saved_count += 1
+              else:
+                  print("Code not found.")
+
+              time.sleep(0.4)
+
+          print(f"\n Successfully saved {saved_count} solutions.")
           EOF
 
-      - name: Commit and Push
+      - name: Commit and Push Solutions
         run: |
           git config user.name "ARYISTA"
-          # Make sure this matches your primary verified GitHub email to get green dots:
           git config user.email "aryabist74@gmail.com"
           git add leetcode-problems/
+          git status
           if git diff --staged --quiet; then
-            echo "No changes detected."
+            echo "No changes detected to commit."
           else
-            git commit -m "sync: leetcode accepted submissions"
+            git commit -m "sync: leetcode accepted submissions [skip ci]"
             git push origin HEAD
           fi
